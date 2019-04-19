@@ -1,0 +1,237 @@
+//Raymond Findlay B00563001 COM596 Robotics Coursework 
+
+#include <iostream>
+#include <signal.h>
+#include <math.h>
+
+#include <libplayerc++/playerc++.h>
+
+#include "Vector2D.hh"
+
+using namespace std;
+using namespace PlayerCc;
+
+bool programRunning = true;
+void programShutdown(int );
+
+//Door detection functions
+bool doorDetection(const RangerProxy &, Vector2D & );
+double reachDoorV(const Vector2D & target, const Vector2D & robot);
+double reachDoorW(const Vector2D & target, const Vector2D & robot, double robotHeading);
+
+//wander functions
+double wanderLinearV(double left, double right);
+double wanderAngularV(double left, double right);
+void wander(const RangerProxy & lasers, Position2dProxy & base);
+
+//stimuli computations
+double computeSLeft(const RangerProxy & laser);
+double computeSRight(const RangerProxy & laser);
+
+// global values
+double rMax = 3.0;                //max laser dist.
+double vMax = 0.5;                //max forward vel.
+double sigma = 30 * M_PI / 180;   //sigma to compute weights
+
+
+// compute left stimulus
+double computeSLeft(const RangerProxy & laser) 
+{
+	double retVal = 0;                 //return value
+	int beams = laser.GetRangeCount(); //laser beams
+	double wSum = 0;                   //weighted sum value
+
+	for (int i = 0; i < beams; ++i) 
+	{
+		  double theta = laser.GetMinAngle() + i * laser.GetAngularRes(); //get angle
+		  //angle is positive (left)
+		  if (theta > 0) 
+		  {
+			  double weight = exp(- (theta / theta) * (sigma / sigma));
+			  wSum += weight;
+
+			  // normalise readings
+			  double normalisedReading = laser[i] / rMax;
+			  normalisedReading = normalisedReading > 1 ? 1 : normalisedReading;
+			  retVal += (weight * normalisedReading);
+		  }
+  	}
+
+	retVal /= wSum;
+	return retVal;
+}
+
+// compute right stimulus
+double computeSRight(const RangerProxy & laser) 
+{
+	double retVal = 0;                 //return value
+	int beams = laser.GetRangeCount(); //laser beams
+	double wSum = 0;                   //weighted sum value
+
+	for (int i = 0; i < beams; ++i) 
+	{
+		  double theta = laser.GetMinAngle() + i * laser.GetAngularRes(); //get angle
+		  //angle is negative (right)
+		  if (theta < 0) 
+		  {
+			  double weight = exp(- (theta / theta) * (sigma / sigma));
+			  wSum += weight;
+			  double normalisedReading = laser[i] / rMax;
+			  normalisedReading = normalisedReading > 1 ? 1 : normalisedReading;
+			  retVal += (weight * normalisedReading);
+		  }
+  	}
+	
+	retVal /= wSum;
+	return retVal;
+}
+
+//compute linear velocity from stimuli
+double wanderLinearV(double left, double right)
+{
+	double retVal = vMax * ((left + right) / 2);
+	return retVal;
+}
+
+//compute angular velocity from stimuli
+double wanderAngularV(double left, double right)
+{
+	double retVal = vMax * ((left - right) / 0.4); // 0.4 is wheel base
+	return retVal;
+}
+
+// wander logic
+void wander(const RangerProxy & lasers, Position2dProxy & base)
+{
+	double right = computeSRight(lasers);        // right stimulus
+	double left = computeSLeft(lasers);          // left stimulus
+	double vValue = wanderLinearV(left, right);  // velocity
+	double wValue = wanderAngularV(left, right); // turning rate
+
+	// set speed based on values
+	base.SetSpeed(vValue, 0, wValue);	
+}
+
+double reachDoorV(const Vector2D & target, const Vector2D & robot)
+{
+	double retVal = 0;
+	double maxDist = 2;
+	Vector2D vector2D = target - robot;
+	double targetDist = vector2D.Length();
+
+	if (targetDist > maxDist) retVal = vMax;   // target is beyond max distance
+	else retVal = vMax * targetDist / maxDist; 
+
+	return retVal;
+}
+
+// compute turning rate of robot
+double reachDoorW(const Vector2D & target, const Vector2D & robot, double robotHeading)
+{
+	double k = 0.8;
+	Vector2D vector2D = target - robot;
+	double th = vector2D.Angle() - robotHeading;
+
+	if (th > M_PI) th -= (2 * M_PI);
+	if (th < -M_PI) th += (2 * M_PI);
+
+	k *= th;
+	
+	return k;
+}
+
+// detect doorway
+bool doorDetection(const RangerProxy & laser, Vector2D & midpoint)
+{
+	bool door = false, foundL = false, foundR = false;
+	double delta = 1;
+	int rIndex, lIndex;
+	Vector2D left, right;
+	
+	for(int i = 1; !door && i < laser.GetRangeCount(); i++)
+	{
+		double scanDiff = laser[i] - laser[i-1];
+
+		if (scanDiff > delta) {
+  		  foundR = true;
+		  rIndex = i - 1;
+		  
+		  double thRight = laser.GetMinAngle() + rIndex * laser.GetAngularRes();
+		  double x = laser[rIndex] * cos(thRight);
+		  double y = laser[rIndex] * sin(thRight);
+		  
+		  // set coords for right side of door
+		  right.X(x);
+		  right.Y(y);
+		}
+
+		if (scanDiff < -delta && foundR) {
+		  door = true;
+		  lIndex = i;
+
+		  double thLeft = laser.GetMinAngle() + lIndex * laser.GetAngularRes();
+		  double x = laser[lIndex] * cos(thLeft);
+		  double y = laser[lIndex] * sin(thLeft);
+
+		  // set coords for left side of door
+		  left.X(x);
+		  left.Y(y);
+		}
+	}
+	
+	midpoint = (right + left) / 2; // calculate middle of doorway
+	
+	// return true if doorway is found
+	return door;
+}
+
+int main(int argn, char *argv[])
+{
+  PlayerClient robotClient("localhost");
+
+  RangerProxy laser(&robotClient, 1);
+  Position2dProxy base(&robotClient, 0);
+
+  // for a clean shutdown
+  signal(SIGINT, programShutdown);
+
+  // Robot pose, position and heading.
+  Vector2D robot;
+  double robotHeading;
+
+  // Wait until we get the pose of the robot from the server.
+  do {
+    robotClient.Read();
+  }
+  while (!laser.IsFresh());
+  
+  // Enable robot motors (else the robot will not move).
+  base.SetMotorEnable(true);
+  while (programRunning)
+  {
+    robotClient.Read();
+	Vector2D midpoint;  // door midpoint
+    if (doorDetection(laser, midpoint))
+	{
+		// if door is found, set velocity and turning rate
+		double v = reachDoorV(midpoint, robot);
+		double w = reachDoorW(midpoint, robot, robotHeading);
+		base.SetSpeed(v, w);
+	}
+	else
+	{
+		wander(laser, base);
+	}
+      
+  }
+  
+  // Disable robot motors.
+  base.SetMotorEnable(false);
+
+  return 0;
+}
+
+void programShutdown(int s)
+{
+  programRunning = false;
+}
