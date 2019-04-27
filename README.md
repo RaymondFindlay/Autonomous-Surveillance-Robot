@@ -3,10 +3,11 @@
 
 Rover that implements: 
 
+* environment scanning
 * wander behaviour 
 * obstacle avoidance
 * door detection 
-* door crossing.
+* door crossing
 
 Part of COM596 Intelligent Robotics coursework.
 
